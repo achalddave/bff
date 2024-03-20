@@ -544,7 +544,7 @@ async fn process_file_s3(
     // Phase 1c: Setup output buffer to upload->s3 eventually...
     let start = Instant::now();
     let mut output_data = Vec::new();
-    let mut encoder = GzEncoder::new(Cursor::new(&mut output_data), Compression::fast());
+    let mut encoder = GzEncoder::new(Cursor::new(&mut output_data), Compression::default());
     let mut buf_writer = BufWriter::with_capacity(1024 * 1024, encoder);
     println!("Phase 1c {:?}", start.elapsed());
 
