@@ -22,7 +22,7 @@ use std::path::{PathBuf};
 use std::string::String;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant};
+use std::time::{Duration,Instant};
 use std::thread::available_parallelism;
 use sysinfo::{
     System,
@@ -517,15 +517,17 @@ async fn process_file_s3(
 
 
     // Phase 1a: Build s3 client
+    let start = Instant::now();
     let region_provider = RegionProviderChain::first_try("us-west-2");
     let config = aws_config::defaults(BehaviorVersion::latest())
         .region(region_provider)
         .load()
         .await;
     let client = Client::new(&config);
-
+    println!("Phase 1a {:?}", start.elapsed());
 
     // Phase 1b: read data into lines
+    let start = Instant::now();
     let object = client
         .get_object()
         .bucket(s3_bucket)
@@ -537,30 +539,46 @@ async fn process_file_s3(
     let mut gz = MultiGzDecoder::new(&s3_data[..]);
     let mut input_string = String::new();
     gz.read_to_string(&mut input_string)?;
+    println!("Phase 1b {:?}", start.elapsed());
 
     // Phase 1c: Setup output buffer to upload->s3 eventually...
+    let start = Instant::now();
     let mut output_data = Vec::new();
-    let mut writer = GzEncoder::new(Cursor::new(&mut output_data), Compression::default());
+    let mut encoder = GzEncoder::new(Cursor::new(&mut output_data), Compression::fast());
+    let mut buf_writer = BufWriter::with_capacity(1024 * 1024, encoder);
+    println!("Phase 1c {:?}", start.elapsed());
 
+    let start = Instant::now();
     let mut count = 0;
     let mut fully_skipped = 0;
+    let mut process_time = Duration::new(0, 0);
+    let mut write_time = Duration::new(0, 0);
     for line in input_string.lines() {
         count += 1;
+        let start_process = Instant::now();
         let dedup_data = process_line(&line.to_string(), &bloom_filter, &bff_args);
         if dedup_data.get("text").unwrap().as_str().unwrap().is_empty() {
+            process_time += start_process.elapsed();
             fully_skipped += 1;
         }
         else {
-            serde_json::to_writer(&mut writer, &dedup_data)?;
-            writer.write_all(b"\n")?;             
+            process_time += start_process.elapsed();
+            let start_write = Instant::now();
+            serde_json::to_writer(&mut buf_writer, &dedup_data)?;
+            buf_writer.write_all(b"\n")?;
+            write_time += start_write.elapsed();
         }
-        
     }
+    println!("Process time {:?}", process_time);
+    println!("Write time {:?}", write_time);
+    println!("Phase 1d {:?}", start.elapsed());
     println!("Number of lines in {:?} is {}", s3_input, count);
 
-
     // to finalize, write to s3
-    writer.finish().unwrap();
+    let start = Instant::now();
+    buf_writer.flush();
+    let encoder = buf_writer.into_inner().expect("Failed to get encoder");
+    encoder.finish().unwrap();
 
     if fully_skipped < count {
         let bytes_to_upload = ByteStream::from(output_data);
@@ -576,6 +594,7 @@ async fn process_file_s3(
         Some(pbar) => pbar.lock().unwrap().inc(1),
         None => (),
     }
+    println!("Phase 1e {:?}", start.elapsed());
 
     Ok(())
 }
